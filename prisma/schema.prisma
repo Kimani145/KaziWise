@@ -1,0 +1,279 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  SUPER_ADMIN
+  ORG_ADMIN
+  MANAGER
+  LEARNER
+}
+
+enum EmploymentStatus {
+  ACTIVE
+  INVITED
+  INACTIVE
+}
+
+enum CourseStatus {
+  DRAFT
+  PUBLISHED
+}
+
+enum ContentType {
+  TEXT
+  VIDEO
+  IMAGE
+  PDF
+}
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+}
+
+enum AudienceType {
+  ALL_EMPLOYEES
+  DEPARTMENT
+  SELECTED_EMPLOYEES
+}
+
+// Assignment status — see State Machine section 4 for transition rules.
+// OVERDUE is deliberately absent here: it is derived (deadline < now() AND
+// status NOT IN (PASSED)), never stored. Do not add it as an enum value.
+enum AssignmentStatus {
+  ASSIGNED
+  STARTED
+  IN_PROGRESS
+  COMPLETED
+  PASSED
+  FAILED
+}
+
+enum AttemptResult {
+  PASSED
+  FAILED
+}
+
+model Organisation {
+  id          String       @id @default(uuid())
+  name        String
+  createdAt   DateTime     @default(now())
+  departments Department[]
+  users       User[]
+  courses     Course[]
+  campaigns   Campaign[]
+}
+
+model Department {
+  id             String       @id @default(uuid())
+  organisationId String
+  organisation   Organisation @relation(fields: [organisationId], references: [id])
+  name           String
+  users          User[]
+
+  @@index([organisationId])
+}
+
+model User {
+  id               String           @id @default(uuid())
+  organisationId   String
+  organisation     Organisation     @relation(fields: [organisationId], references: [id])
+  departmentId     String
+  department       Department       @relation(fields: [departmentId], references: [id])
+  managerId        String? // flat direct-report scoping — see decisions table
+  manager          User?            @relation("ManagerReports", fields: [managerId], references: [id])
+  reports          User[]           @relation("ManagerReports")
+  name             String
+  email            String           @unique
+  employeeNumber   String
+  passwordHash     String
+  role             Role
+  employmentStatus EmploymentStatus @default(INVITED)
+  createdAt        DateTime         @default(now())
+
+  assignments Assignment[]
+  auditLogs   AuditLog[]
+
+  @@unique([organisationId, employeeNumber])
+  @@index([organisationId])
+  @@index([managerId])
+}
+
+model Course {
+  id                 String       @id @default(uuid())
+  organisationId     String
+  organisation       Organisation @relation(fields: [organisationId], references: [id])
+  title              String
+  description        String
+  estimatedDuration  String?
+  status             CourseStatus @default(DRAFT)
+  certificateEnabled Boolean      @default(false) // DEFAULT ONLY — see decisions table; issuance reads Campaign.certificateEnabled, never this field
+  courseVersion      Int          @default(1) // incremented on re-publish after edits
+  modules            Module[]
+  campaigns          Campaign[]
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  questions          Question[]
+
+  @@index([organisationId])
+}
+
+model Module {
+  id       String   @id @default(uuid())
+  courseId String
+  course   Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  title    String
+  order    Int
+  lessons  Lesson[]
+}
+
+model Lesson {
+  id       String           @id @default(uuid())
+  moduleId String
+  module   Module           @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  title    String
+  order    Int
+  required Boolean          @default(true)
+  blocks   ContentBlock[]
+  progress LessonProgress[]
+}
+
+model ContentBlock {
+  id       String      @id @default(uuid())
+  lessonId String
+  lesson   Lesson      @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  type     ContentType
+  title    String
+  body     String // text content, or a storage reference/URL for VIDEO/IMAGE/PDF — see section 6 on uploads
+  order    Int
+}
+
+model Question {
+  id       String   @id @default(uuid())
+  courseId String
+  course   Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  text     String
+  order    Int
+  options  Option[]
+}
+
+model Option {
+  id         String   @id @default(uuid())
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  text       String
+  isCorrect  Boolean
+}
+
+model Campaign {
+  id                 String                 @id @default(uuid())
+  organisationId     String
+  organisation       Organisation           @relation(fields: [organisationId], references: [id])
+  courseId           String
+  course             Course                 @relation(fields: [courseId], references: [id])
+  name               String
+  audienceType       AudienceType
+  departmentId       String? // required if audienceType = DEPARTMENT
+  status             CampaignStatus         @default(DRAFT)
+  deadline           DateTime
+  passMark           Int // 1–100, validated at launch — see section 5
+  certificateEnabled Boolean                @default(false) // RUNTIME AUTHORITY for issuance
+  assignments        Assignment[]
+  selectedUsers      CampaignSelectedUser[] // only populated if audienceType = SELECTED_EMPLOYEES
+  createdAt          DateTime               @default(now())
+
+  @@index([organisationId])
+}
+
+model CampaignSelectedUser {
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  userId     String
+
+  @@id([campaignId, userId])
+}
+
+model Assignment {
+  id              String           @id @default(uuid())
+  campaignId      String
+  campaign        Campaign         @relation(fields: [campaignId], references: [id])
+  userId          String
+  user            User             @relation(fields: [userId], references: [id])
+  status          AssignmentStatus @default(ASSIGNED)
+  courseVersion   Int // copied from Course.courseVersion at assignment creation
+  assignedAt      DateTime         @default(now())
+  deadline        DateTime // copied from Campaign.deadline at creation for stable historical reference
+  score           Int?
+  lastReminderAt  DateTime?
+  completedLateAt DateTime? // set if the FIRST passing completion happened after `deadline` — the late-completion evidence FR-020 requires
+  lessonProgress  LessonProgress[]
+  attempts        Attempt[]
+  certificate     Certificate?
+
+  @@unique([campaignId, userId])
+  @@index([userId])
+  @@index([campaignId])
+}
+
+model LessonProgress {
+  id           String     @id @default(uuid())
+  assignmentId String
+  assignment   Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  lessonId     String
+  lesson       Lesson     @relation(fields: [lessonId], references: [id])
+  completedAt  DateTime   @default(now())
+
+  @@unique([assignmentId, lessonId])
+}
+
+model Attempt {
+  id            String        @id @default(uuid())
+  assignmentId  String
+  assignment    Assignment    @relation(fields: [assignmentId], references: [id])
+  attemptNumber Int
+  answers       Json // { [questionId]: optionId }
+  score         Int
+  result        AttemptResult
+  submittedAt   DateTime      @default(now())
+
+  @@unique([assignmentId, attemptNumber])
+  @@index([assignmentId])
+}
+
+// Attempts are append-only. No update/delete route may ever target this table.
+
+model Certificate {
+  id                String     @id @default(uuid())
+  assignmentId      String     @unique
+  assignment        Assignment @relation(fields: [assignmentId], references: [id])
+  userId            String
+  courseId          String
+  courseVersion     Int
+  score             Int
+  certificateNumber String     @unique
+  verificationCode  String     @unique
+  completionDate    DateTime   @default(now())
+  completedLate     Boolean    @default(false)
+}
+
+// Certificates are immutable. No update/delete route may ever target this table.
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  action     String // e.g. "campaign.launch", "employee.deactivate", "certificate.issue"
+  resourceId String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+}
