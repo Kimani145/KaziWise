@@ -7,6 +7,7 @@ import {
   getLearnerAssignmentDetail,
   getLearnerAssignments,
   getLearnerCertificates,
+  getBlockSignedUrl,
   submitAssessmentAttempt,
 } from './assignment.service.js';
 
@@ -54,6 +55,35 @@ export const assignmentRoutes: FastifyPluginAsync = async (fastify) => {
           user.id,
           assignmentId,
           lessonId
+        );
+        return reply.send(result);
+      } catch (err: any) {
+        return reply.status(err.statusCode || 500).send({
+          error: err.code || 'INTERNAL_ERROR',
+          message: err.message,
+        });
+      }
+    }
+  );
+
+  // GET /me/assignments/:assignmentId/lessons/:lessonId/blocks/:blockId/url
+  fastify.get(
+    '/assignments/:assignmentId/lessons/:lessonId/blocks/:blockId/url',
+    async (request, reply) => {
+      const user = request.user as AuthUser;
+      const { assignmentId, lessonId, blockId } = request.params as {
+        assignmentId: string;
+        lessonId: string;
+        blockId: string;
+      };
+
+      try {
+        const result = await getBlockSignedUrl(
+          user.organisationId,
+          user.id,
+          assignmentId,
+          lessonId,
+          blockId
         );
         return reply.send(result);
       } catch (err: any) {

@@ -54,9 +54,14 @@ psql -h 127.0.0.1 -p 5433 -U postgres -c "CREATE DATABASE kaziwise_test;"
 ```
 
 ### 2.3 Applying Prisma Schema & Generating Client
+Schema pushes run with `directUrl` (`MIGRATION_DATABASE_URL` pointing to the `postgres` superuser) configured in `prisma/schema.prisma`. This ensures schema management runs with DDL privileges, while the runtime application role `kaziwise_app` remains strictly unprivileged (preventing it from becoming table owner and bypassing RLS):
+
 ```bash
-# Push schema to the development database
+# Push schema to the development database (uses MIGRATION_DATABASE_URL)
 pnpm run prisma:push
+
+# Push schema to the test database for test runs
+MIGRATION_DATABASE_URL="postgresql://postgres@127.0.0.1:5433/kaziwise_test?schema=public" pnpm run prisma:push
 ```
 
 ### 2.4 Enabling PostgreSQL Row-Level Security (RLS)
@@ -126,7 +131,7 @@ curl -s http://127.0.0.1:3001/health
 
 ## 5. Testing & Quality Assurance
 
-Run the automated Vitest test suite (41 tests across 5 test suites):
+Run the automated Vitest test suite (44 tests across 5 test suites):
 
 ```bash
 pnpm test
@@ -148,7 +153,9 @@ pnpm test
    - **FR-008**: Employee CSV and Excel (XLSX) batch import returning `{ imported: [...], rejected: [{row, reason}] }`.
    - **Public Certificate Verification**: `GET /api/v1/certificates/:id/verify` returns authenticity details without leaking PII.
    - **FR-020**: Late completions set `completedLateAt` on the assignment and `completedLate = true` on the certificate.
-   - **Reports & Export**: Generates compliant XLSX reports based on filter criteria.
+   - **Reports & Export (P-01)**: Generates compliant XLSX, CSV, and genuine PDF byte stream (`%PDF-`) reports with table data extraction verification.
+   - **P-04 (Assignment STARTED State)**: Verifies `ASSIGNED` -> `STARTED` on first assignment view, `IN_PROGRESS` on first required lesson completion, and `COMPLETED` when all required lessons are complete.
+   - **P-03 (Moodle-Style File API)**: Validates `{organisationId}/{contentBlockId}/{filename}` object key scheme, short-lived signed URLs, media access, and cross-organisation access rejection with 403 Forbidden.
 
 4. **Pure Scoring (`src/modules/assessment/scoring.test.ts`)**
    - Tests pure function `calculateScore`: 100%, 0%, partial scores, unanswered questions counted as wrong, empty question set guarded against division by zero / `NaN`.
@@ -207,3 +214,56 @@ Returns:
   "completedLate": false
 }
 ```
+
+---
+
+## 7. Next.js 15 Production Frontend
+
+The production frontend is located in `frontend/` and built using **Next.js 15 App Router**, **React 19**, **TanStack Query v5**, and **Tailwind CSS**.
+
+### 7.1 Architecture & Core Principles
+- **Server-Authoritative**: Zero client-side re-implementation of scoring, eligibility, or certificate issuance logic.
+- **Strict RBAC & Capability-Driven UI**: All gating is evaluated through `can(user, action)` matching the backend `Action` union identically.
+- **No Global Client-Side Cache**: Zero Redux/Zustand. All server state is managed via TanStack Query hooks with typed factory keys in `frontend/src/lib/query-keys.ts`.
+- **Explicit Learner Navigation**: Every learner route and API call carries `assignmentId` (`/learner/course/[assignmentId]`).
+- **Responsive & Accessible**: Minimum 44px touch targets on mobile viewports (320/375/390/430px). Every view has explicit loading, empty, and error states.
+
+### 7.2 Launching Frontend Development Server
+Ensure the backend server is running on port `3001` (or your configured port):
+
+```bash
+# In the repository root:
+pnpm --dir frontend run dev
+```
+The frontend application will be available at **`http://localhost:3000`**. Requests to `/api/v1/*` are automatically proxied to `http://127.0.0.1:3001/api/v1/*`.
+
+### 7.3 Building for Production
+```bash
+# Build optimized Next.js production bundle
+pnpm --dir frontend run build
+
+# Start production server
+pnpm --dir frontend run start
+```
+
+### 7.4 Key Frontend Surfaces & Routes
+
+| Surface | Path | Description | Access Control |
+|---|---|---|---|
+| **Public Auth** | `/login` | Work email and password authentication (no self-registration, no role selector). | Public |
+| **Public Auth** | `/forgot-password` & `/reset-password` | Password recovery workflow. | Public |
+| **Public Verification** | `/verify/[code]` | Non-PII certificate audit record display. | Public |
+| **Org Admin** | `/dashboard` | Executive telemetry: total employees, active courses/campaigns, pass rates, overdue count. | `authorCourses` or `manageEmployees` |
+| **Org Admin** | `/employees` | Workforce directory, department filters, add employee modal, CSV import reconciliation. | `manageEmployees` |
+| **Org Admin** | `/courses` | Course catalog, draft/published badges, module/lesson counts, create course modal. | `authorCourses` |
+| **Org Admin** | `/courses/[id]/builder` | Full curriculum builder: modules, lessons, video/image/pdf blocks, questions. | `authorCourses` |
+| **Org Admin** | `/campaigns` | Campaign management, audience targeting (Department / Selected Employees), launch triggers. | `manageCampaigns` |
+| **Org Admin & Manager** | `/reports` | Synchronized summary cards, filters, Excel/CSV/PDF export, per-row reminder dispatch. | `viewOrgReports` or `viewTeamReports` |
+| **Org Admin & Learner** | `/certificates` | Admin org certificates registry or Learner personal credentials with verification links. | Authenticated |
+| **Manager** | `/dashboard` | Direct-reports only team dashboard with overdue compliance alerts. | `viewTeamReports` |
+| **Learner** | `/home` | Learner portal: greeting, active assigned trainings, statutory deadlines, overdue alerts. | `LEARNER` |
+| **Learner** | `/learning` | Assigned courses list carrying explicit `assignmentId`. | `LEARNER` |
+| **Learner** | `/learner/course/[assignmentId]` | Course player: numeric progress, module/lesson navigation, signed media stream player. | `LEARNER` |
+| **Learner** | `/learner/course/[assignmentId]/assessment` | Final compliance quiz (44px touch targets). | `LEARNER` |
+| **Learner** | `/learner/course/[assignmentId]/result` | Score breakdown with retake button strictly conditionally rendered only on `FAILED`. | `LEARNER` |
+| **Learner** | `/profile` | User profile details and sign out. | Authenticated |

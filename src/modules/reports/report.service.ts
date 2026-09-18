@@ -3,6 +3,7 @@ import { prisma } from '../../db/client.js';
 import { scopedToOrg, withTenantContext } from '../../db/tenant.js';
 import { createAuditLog } from '../audit/audit.service.js';
 import ExcelJS from 'exceljs';
+import PDFDocument from 'pdfkit';
 
 export interface ReportFilterParams {
   campaignId?: string;
@@ -229,11 +230,138 @@ export async function exportAssignmentsReport(
     };
   }
 
-  // Default to xlsx (or if format is pdf/xlsx)
+  if (format === 'pdf') {
+    const pdfBuffer = await generatePdfReport(data);
+    return {
+      buffer: pdfBuffer,
+      mimeType: 'application/pdf',
+      filename: `kaziwise-report-${Date.now()}.pdf`,
+    };
+  }
+
+  // Default to xlsx
   const xlsxBuffer = await workbook.xlsx.writeBuffer();
   return {
     buffer: Buffer.from(xlsxBuffer),
     mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     filename: `kaziwise-report-${Date.now()}.xlsx`,
   };
+}
+
+async function generatePdfReport(data: {
+  summary: {
+    totalAssignments: number;
+    passedCount: number;
+    failedCount: number;
+    inProgressCount: number;
+    assignedCount: number;
+    completedCount: number;
+    overdueCount: number;
+    completionRate: number;
+    averageScore: number;
+  };
+  rows: Array<{
+    id: string;
+    learnerId: string;
+    learnerName: string;
+    learnerEmail: string;
+    employeeNumber: string;
+    departmentName: string;
+    managerName: string | null;
+    campaignId: string;
+    campaignName: string;
+    courseTitle: string;
+    status: AssignmentStatus;
+    deadline: Date;
+    isOverdue: boolean;
+    score: number | null;
+    passMark: number;
+    attemptsCount: number;
+    certificateNumber: string | null;
+    completionDate: Date | null;
+    completedLate: boolean;
+  }>;
+}): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
+    const chunks: Buffer[] = [];
+
+    doc.on('data', (chunk: Buffer) => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', (err: Error) => reject(err));
+
+    // Header title
+    doc.fontSize(16).fillColor('#0f172a').text('KaziWise Training Compliance Report', 30, 30);
+    doc.moveDown(0.3);
+
+    // Summary line
+    doc.fontSize(9).fillColor('#475569');
+    doc.text(
+      `Generated: ${new Date().toISOString()} | Total: ${data.summary.totalAssignments} | Passed: ${data.summary.passedCount} | In Progress: ${data.summary.inProgressCount} | Overdue: ${data.summary.overdueCount} | Completion Rate: ${data.summary.completionRate}% | Avg Score: ${data.summary.averageScore}%`
+    );
+    doc.moveDown(0.8);
+
+    const cols = [
+      { label: 'Emp #', width: 60 },
+      { label: 'Learner Name', width: 110 },
+      { label: 'Email', width: 130 },
+      { label: 'Department', width: 90 },
+      { label: 'Campaign', width: 110 },
+      { label: 'Status', width: 65 },
+      { label: 'Score', width: 45 },
+      { label: 'Pass %', width: 45 },
+      { label: 'Overdue', width: 45 },
+      { label: 'Cert No', width: 80 },
+    ];
+
+    const startX = 30;
+    let y = doc.y;
+
+    const renderHeader = (headerY: number) => {
+      doc.rect(startX, headerY, 782, 18).fill('#f1f5f9');
+      doc.fillColor('#0f172a').fontSize(8);
+      let curX = startX + 4;
+      for (const col of cols) {
+        doc.text(col.label, curX, headerY + 4, { width: col.width - 4, ellipsis: true });
+        curX += col.width;
+      }
+    };
+
+    renderHeader(y);
+    y += 22;
+
+    for (const row of data.rows) {
+      if (y > 540) {
+        doc.addPage({ margin: 30, size: 'A4', layout: 'landscape' });
+        y = 30;
+        renderHeader(y);
+        y += 22;
+      }
+
+      doc.fillColor('#334155').fontSize(8);
+      let curX = startX + 4;
+
+      const values = [
+        row.employeeNumber,
+        row.learnerName,
+        row.learnerEmail,
+        row.departmentName,
+        row.campaignName,
+        row.status,
+        row.score !== null ? `${row.score}%` : 'N/A',
+        `${row.passMark}%`,
+        row.isOverdue ? 'YES' : 'NO',
+        row.certificateNumber || 'N/A',
+      ];
+
+      for (let i = 0; i < cols.length; i++) {
+        doc.text(values[i], curX, y + 3, { width: cols[i].width - 4, ellipsis: true });
+        curX += cols[i].width;
+      }
+
+      y += 16;
+    }
+
+    doc.end();
+  });
 }

@@ -4,7 +4,7 @@ import {
   Prisma,
 } from '@prisma/client';
 import { prisma } from '../../db/client.js';
-import { scopedToOrg, withTenantContext } from '../../db/tenant.js';
+import { scopedToOrg, withTenantContext, withBypassRls } from '../../db/tenant.js';
 import { calculateScore, QuestionItem } from '../assessment/scoring.js';
 import { createAuditLog } from '../audit/audit.service.js';
 import crypto from 'crypto';
@@ -115,6 +115,15 @@ export async function getLearnerAssignmentDetail(
       throw error;
     }
 
+    let currentStatus = assignment.status;
+    if (currentStatus === AssignmentStatus.ASSIGNED) {
+      await tx.assignment.update({
+        where: { id: assignment.id },
+        data: { status: AssignmentStatus.STARTED },
+      });
+      currentStatus = AssignmentStatus.STARTED;
+    }
+
     const now = new Date();
     const completedLessonIds = new Set(assignment.lessonProgress.map((lp) => lp.lessonId));
 
@@ -128,10 +137,10 @@ export async function getLearnerAssignmentDetail(
       courseVersion: assignment.courseVersion,
       passMark: assignment.campaign.passMark,
       certificateEnabled: assignment.campaign.certificateEnabled,
-      status: assignment.status,
+      status: currentStatus,
       deadline: assignment.deadline,
       score: assignment.score,
-      isOverdue: assignment.deadline < now && assignment.status !== AssignmentStatus.PASSED,
+      isOverdue: assignment.deadline < now && currentStatus !== AssignmentStatus.PASSED,
       completedLessonIds: Array.from(completedLessonIds),
       modules: assignment.campaign.course.modules,
       latestAttempt: assignment.attempts[0] || null,
@@ -227,20 +236,17 @@ export async function completeLesson(
     const totalRequired = requiredLessons.length;
     const requiredCompleted = requiredLessons.filter((l) => completedIds.has(l.id)).length;
 
-    // State machine calculation per Section 4:
-    // ASSIGNED -> STARTED (at least 1 lesson complete / first opened)
-    // STARTED -> IN_PROGRESS (at least 1 required lesson complete, not all)
-    // IN_PROGRESS -> COMPLETED (all required lessons complete -> unlocked for assessment)
-    // If already FAILED, keep FAILED (retake allows going straight to assessment)
+    // State machine calculation per Section 4 & Remediation P-04:
+    // If not FAILED and not all required lessons complete yet -> IN_PROGRESS
+    // If all required lessons complete -> COMPLETED
+    // STARTED is set exclusively on assignment open (GET /me/assignments/:id).
     let nextStatus: AssignmentStatus = assignment.status;
 
     if (assignment.status !== AssignmentStatus.FAILED) {
       if (totalRequired === 0 || requiredCompleted >= totalRequired) {
         nextStatus = AssignmentStatus.COMPLETED;
-      } else if (requiredCompleted > 0) {
-        nextStatus = AssignmentStatus.IN_PROGRESS;
       } else {
-        nextStatus = AssignmentStatus.STARTED;
+        nextStatus = AssignmentStatus.IN_PROGRESS;
       }
     }
 
@@ -550,5 +556,85 @@ export async function getLearnerCertificates(
       },
       orderBy: { completionDate: 'desc' },
     });
+  });
+}
+
+export async function getBlockSignedUrl(
+  organisationId: string,
+  userId: string,
+  assignmentId: string,
+  lessonId: string,
+  blockId: string
+): Promise<{ url: string; expiresAt: string }> {
+  // Use withBypassRls to evaluate cross-org / IDOR ownership and return 403 per P-03
+  const assignment = await withBypassRls(async (tx) => {
+    return tx.assignment.findUnique({
+      where: { id: assignmentId },
+      include: {
+        campaign: {
+          include: {
+            course: true,
+          },
+        },
+      },
+    });
+  });
+
+  if (!assignment) {
+    const error = new Error('Assignment not found');
+    (error as any).statusCode = 404;
+    (error as any).code = 'NOT_FOUND';
+    throw error;
+  }
+
+  if (assignment.userId !== userId || assignment.campaign.organisationId !== organisationId) {
+    const error = new Error('Access denied: assignment does not belong to user or organisation');
+    (error as any).statusCode = 403;
+    (error as any).code = 'FORBIDDEN';
+    throw error;
+  }
+
+  return withTenantContext(organisationId, async (tx) => {
+
+    const block = await tx.contentBlock.findUnique({
+      where: { id: blockId },
+      include: {
+        lesson: {
+          include: {
+            module: true,
+          },
+        },
+      },
+    });
+
+    if (!block || block.lessonId !== lessonId) {
+      const error = new Error('Content block not found in specified lesson');
+      (error as any).statusCode = 404;
+      (error as any).code = 'NOT_FOUND';
+      throw error;
+    }
+
+    if (block.lesson.module.courseId !== assignment.campaign.courseId) {
+      const error = new Error('Content block does not belong to this assignment course');
+      (error as any).statusCode = 403;
+      (error as any).code = 'FORBIDDEN';
+      throw error;
+    }
+
+    const expiresInMs = 15 * 60 * 1000;
+    const expiresAt = new Date(Date.now() + expiresInMs);
+    const objectKey = block.body;
+
+    const token = crypto
+      .createHmac('sha256', process.env.JWT_SECRET || 'secret')
+      .update(`${objectKey}:${expiresAt.getTime()}`)
+      .digest('hex');
+
+    const url = `/api/v1/uploads/storage/${objectKey}?token=${token}&expires=${expiresAt.getTime()}`;
+
+    return {
+      url,
+      expiresAt: expiresAt.toISOString(),
+    };
   });
 }

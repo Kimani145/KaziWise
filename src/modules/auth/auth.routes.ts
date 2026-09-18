@@ -6,8 +6,55 @@ import {
   refreshAccessToken,
   requestPasswordReset,
 } from './auth.service.js';
+import { verifyAccessToken } from '../../auth/jwt.js';
+import { withBypassRls } from '../../db/tenant.js';
 
 export const authRoutes: FastifyPluginAsync = async (fastify) => {
+  // GET /me — Returns current authenticated user profile
+  fastify.get('/me', async (request, reply) => {
+    const authHeader = request.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return reply.status(401).send({
+        error: 'UNAUTHORIZED',
+        message: 'Authentication required',
+      });
+    }
+
+    const token = authHeader.substring(7);
+    try {
+      const payload = verifyAccessToken(token);
+      const user = await withBypassRls(async (tx) => {
+        return tx.user.findUnique({
+          where: { id: payload.sub },
+          select: {
+            id: true,
+            organisationId: true,
+            email: true,
+            name: true,
+            role: true,
+            departmentId: true,
+            managerId: true,
+            employeeNumber: true,
+            employmentStatus: true,
+          },
+        });
+      });
+
+      if (!user || user.employmentStatus === 'INACTIVE') {
+        return reply.status(401).send({
+          error: 'UNAUTHORIZED',
+          message: 'User account is inactive or not found',
+        });
+      }
+
+      return reply.send(user);
+    } catch {
+      return reply.status(401).send({
+        error: 'UNAUTHORIZED',
+        message: 'Invalid or expired access token',
+      });
+    }
+  });
   const loginSchema = z.object({
     email: z.string().email(),
     password: z.string().min(1),
@@ -101,6 +148,43 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   fastify.post('/password-reset/confirm', async (request, reply) => {
+    const parseResult = resetConfirmSchema.safeParse(request.body);
+    if (!parseResult.success) {
+      return reply.status(400).send({
+        error: 'VALIDATION_ERROR',
+        message: 'Invalid reset confirmation payload. Password must be at least 8 characters.',
+      });
+    }
+
+    try {
+      const result = await confirmPasswordReset(
+        parseResult.data.token,
+        parseResult.data.newPassword
+      );
+      return reply.send(result);
+    } catch (err: any) {
+      return reply.status(err.statusCode || 400).send({
+        error: err.code || 'BAD_REQUEST',
+        message: err.message,
+      });
+    }
+  });
+
+  // Aliases matching frontend client routes
+  fastify.post('/forgot-password', async (request, reply) => {
+    const parseResult = resetRequestSchema.safeParse(request.body);
+    if (!parseResult.success) {
+      return reply.status(400).send({
+        error: 'VALIDATION_ERROR',
+        message: 'Invalid email address',
+      });
+    }
+
+    const result = await requestPasswordReset(parseResult.data.email);
+    return reply.send(result);
+  });
+
+  fastify.post('/reset-password', async (request, reply) => {
     const parseResult = resetConfirmSchema.safeParse(request.body);
     if (!parseResult.success) {
       return reply.status(400).send({

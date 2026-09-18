@@ -51,6 +51,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     if (
       url.startsWith('/health') ||
       url.startsWith('/api/v1/auth/') ||
+      url.startsWith('/api/v1/uploads/storage/') ||
       /\/api\/v1\/certificates\/[^/]+\/verify/.test(url)
     ) {
       return;
