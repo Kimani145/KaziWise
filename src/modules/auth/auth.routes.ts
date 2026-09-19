@@ -77,7 +77,7 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
         path: '/',
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
+        sameSite: 'none',
         maxAge: 7 * 24 * 60 * 60, // 7 days in seconds
       });
 
@@ -121,7 +121,11 @@ export const authRoutes: FastifyPluginAsync = async (fastify) => {
   });
 
   fastify.post('/logout', async (request, reply) => {
-    reply.clearCookie('refreshToken', { path: '/' });
+    reply.clearCookie('refreshToken', {
+      path: '/',
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'none',
+    });
     return reply.send({ success: true, message: 'Logged out successfully' });
   });
 

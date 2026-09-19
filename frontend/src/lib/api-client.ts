@@ -65,6 +65,8 @@ export function clearAuth() {
   }
 }
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+
 export async function apiFetch<T>(
   endpoint: string,
   options: RequestInit = {},
@@ -81,7 +83,9 @@ export async function apiFetch<T>(
     headers.set('Content-Type', 'application/json');
   }
 
-  const url = endpoint.startsWith('http') ? endpoint : `/api/v1${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
+  const url = endpoint.startsWith('http')
+    ? endpoint
+    : `${API_BASE}/api/v1${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
 
   let res: Response;
   try {
@@ -100,7 +104,8 @@ export async function apiFetch<T>(
       if (!isRefreshing) {
         isRefreshing = true;
         try {
-          const refreshRes = await fetch('/api/v1/auth/refresh', {
+          const refreshUrl = `${API_BASE}/api/v1/auth/refresh`;
+          const refreshRes = await fetch(refreshUrl, {
             method: 'POST',
             credentials: 'include',
           });
